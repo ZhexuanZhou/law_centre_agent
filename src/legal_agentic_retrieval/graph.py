@@ -133,18 +133,30 @@ class LegalRetrievalAgent:
         exact = self.index.exact(plan.exact_citations)
         exact_ids = {item.evidence_id for item in exact}
         semantic = [item for item in evidence if item.evidence_id not in exact_ids]
+        rerank_limit = request.top_k
+        if plan.task == "case_search":
+            rerank_limit = min(len(semantic), max(request.top_k * 2, 10))
         reranked = self.reranker.rerank(
-            request.text,
+            _rerank_query(request.text, plan.task),
             semantic,
-            top_n=request.top_k,
+            top_n=rerank_limit,
         )
-        ranked = _merge_with_source_coverage(
-            exact,
-            reranked,
-            semantic,
-            required_sources=plan.filters.source_types,
-            limit=request.top_k,
-        )
+        if plan.task == "case_search":
+            ranked = _merge_case_search(
+                exact,
+                reranked,
+                semantic,
+                reserve_law="law_unit" in plan.filters.source_types,
+                limit=request.top_k,
+            )
+        else:
+            ranked = _merge_with_source_coverage(
+                exact,
+                reranked,
+                semantic,
+                required_sources=_required_source_order(plan),
+                limit=request.top_k,
+            )
         return {"evidence": [item.to_dict() for item in ranked]}
 
     def _hydrate(self, state: AgentState) -> dict[str, Any]:
@@ -199,7 +211,11 @@ class LegalRetrievalAgent:
     ) -> dict[str, Any]:
         plan = RetrievalPlan.from_mapping(state["plan"])
         hydrated = [Evidence(**item) for item in state.get("hydrated_evidence", [])]
-        exact_ids = {item.evidence_id for item in self.index.exact(plan.exact_citations)}
+        exact_ids = (
+            {item.evidence_id for item in self.index.exact(plan.exact_citations)}
+            if plan.task != "case_search"
+            else set()
+        )
         packed = self.evidence_packer.pack(
             hydrated,
             exact_ids=exact_ids,
@@ -222,6 +238,51 @@ class LegalRetrievalAgent:
 
 def _dedupe(evidence: list[Evidence]) -> list[Evidence]:
     return list({item.evidence_id: item for item in evidence}.values())
+
+
+def _rerank_query(query: str, task: str) -> str:
+    if task == "case_search":
+        return (
+            "Retrieval task: case search. Rank factually matching case summaries before "
+            f"supporting legal provisions.\nUser query: {query}"
+        )
+    if task == "risk":
+        return (
+            "Retrieval task: legal risk assessment. Relevant evidence may cover the directly "
+            "applicable law, analogous cases, and supplementary obligations.\n"
+            f"User query: {query}"
+        )
+    return query
+
+
+def _required_source_order(plan: RetrievalPlan) -> tuple[str, ...]:
+    sources = plan.filters.source_types
+    if plan.task != "case_search" or "case" not in sources:
+        return sources
+    return ("case", *(source for source in sources if source != "case"))
+
+
+def _merge_case_search(
+    exact: list[Evidence],
+    reranked: list[Evidence],
+    candidates: list[Evidence],
+    *,
+    reserve_law: bool,
+    limit: int,
+) -> list[Evidence]:
+    ordered = _dedupe([*reranked, *candidates, *exact])
+    cases = [item for item in ordered if item.source_type == "case"]
+    laws = _dedupe(
+        [
+            *exact,
+            *(item for item in ordered if item.source_type == "law_unit"),
+        ]
+    )
+    case_limit = limit
+    if reserve_law and laws and limit > 1:
+        case_limit -= 1
+    selected_cases = cases[:case_limit]
+    return _dedupe([*selected_cases, *laws, *cases])[:limit]
 
 
 def _merge_with_source_coverage(

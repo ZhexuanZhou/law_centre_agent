@@ -40,14 +40,17 @@ class EvidencePacker:
     ) -> list[Evidence]:
         exact = set(exact_ids)
         priority = set(priority_ids)
-        ordered = sorted(
-            evidence,
-            key=lambda item: (
-                item.evidence_id not in exact,
-                item.evidence_id not in priority,
-                -item.score,
-            ),
-        )
+        ordered = [
+            item
+            for _, item in sorted(
+                enumerate(evidence),
+                key=lambda indexed: (
+                    indexed[1].evidence_id not in priority,
+                    indexed[1].evidence_id not in exact,
+                    indexed[0],
+                ),
+            )
+        ]
         packed: list[Evidence] = []
         remaining = self.total_budget
         for index, item in enumerate(ordered):

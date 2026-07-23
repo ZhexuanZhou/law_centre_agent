@@ -245,6 +245,8 @@ result = agent.invoke(
 | `--max-replans` | 1 | 最多恢复次数，允许范围 0–3 |
 | `--response-language` | `zh-CN` | 最终答案语言 |
 | `--reference-only` | false | 只返回最终证据 |
+| `LLM_JSON_RETRIES` | 2 | LLM JSON 解析失败后的纠错重试次数，范围 0–5 |
+| `RERANK_RETRIES` | 2 | rerank HTTP 或 JSON 失败后的重试次数，范围 0–5 |
 | `EVIDENCE_TOKEN_BUDGET` | 42,000 | 交给 grader/synthesizer 的证据预算 |
 | `LLM_CONTEXT_WINDOW` | 60,000 | LLM 上下文上限 |
 | `TOKEN_SAFETY_FACTOR` | 1.2 | 离线 token 估算安全系数 |
@@ -263,10 +265,12 @@ result = agent.invoke(
 - `limitations`：数据或证据缺口；
 - `disclaimer`：非法律建议声明；
 - `task`、`plan`：最终任务分类和检索计划；
-- `evidence_grade`：充分性状态；
+- `evidence_grade`：充分性状态；风险任务还包含主法条、相似案例和补充义务三类 coverage；
 - `evidence`：最终证据。
 
 每个 finding 必须引用有效 `evidence_id`。模型虚构的 ID 会被过滤；没有有效证据的 finding 不会进入输出。
+
+Planner、grader 和 synthesizer 的 JSON 会先做保守语法恢复；仍不能解析或输出因 token 上限被截断时，系统将原响应连同纠错指令重新提交。单次计划最多保留 8 个 query 和 12 个直接相关的精确条文，避免无边界枚举相邻条文。Qwen rerank 的 HTTP/JSON 失败也会在上限内重新请求。`case_search` 会扩大重排候选池，并在最终证据中优先排列案例，支持法条排在案例之后。
 
 `Evidence.is_truncated=true` 只表示由于上下文预算选择了部分 passage，不表示 SQLite 中的原始法规或案例被截断。
 
@@ -463,6 +467,40 @@ python -m legal_agentic_retrieval.eval_cli score \
 ```
 
 评测器输出 Recall@K、RequiredRecall@K、MRR、nDCG、Precision 和比较对象覆盖率。完整标注规范和防止 test 泄漏的流程见 [evals/README.md](evals/README.md)。
+
+### 最终回归结论（2026-07-23）
+
+本轮使用 `corpus_v3.sqlite3`、Qwen3.5-27B-FP8、Qwen3-Embed 和 Qwen3-Reranker，重新执行全部 24 条 gold 样本。16 条 dev、8 条 held-out test 均成功完成，没有 planner JSON、reranker JSON、HTTP 或索引异常。以下数字来自同一轮运行；LLM 和 reranker 具有非确定性，更换模型、语料或服务参数后应重新评测。
+
+| 范围 | 样本 | 失败 | Recall@5 | RequiredRecall@5 | MRR@5 | nDCG@5 | Coverage@5 | Recall@10 | RequiredRecall@10 | Coverage@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| dev | 16 | 0 | 0.6397 | 0.9167 | 0.8406 | 0.7027 | 0.8750 | 0.6680 | 0.9167 | 0.8750 |
+| test | 8 | 0 | 0.5435 | 0.7292 | 0.8750 | 0.6515 | 0.7917 | 0.6292 | 0.7292 | 0.8750 |
+| 综合 | 24 | 0 | 0.6076 | 0.8542 | 0.8521 | 0.6857 | 0.8472 | 0.6551 | 0.8542 | 0.8750 |
+
+综合结果按任务拆分：
+
+| 任务 | 推荐观察点 | Recall | RequiredRecall | MRR | nDCG | Coverage | 结论 |
+|---|---|---:|---:|---:|---:|---:|---|
+| 精确法规 | @3 | 1.0000 | 1.0000 | 0.9167 | 0.9385 | 1.0000 | 条文在 Top-3 内完整召回；6 条中 5 条位于 Top-1 |
+| 案例搜索 | @5 | 0.4167 | 1.0000 | 0.6583 | 0.5356 | 1.0000 | 必需案例和任务覆盖稳定进入结果，但相关案例的覆盖面仍需提高 |
+| 跨法域比较 | @10 | 0.8238 | 0.8333 | 0.9167 | 0.8140 | 0.9444 | 整体可用，少数比较目标仍存在缺口 |
+| 风险识别 | @10 | 0.3798 | 0.5833 | 0.9167 | 0.4629 | 0.5556 | 三类 coverage 检查和补检链路可运行，但仍是当前主要质量短板 |
+
+结论：精确法规检索已经稳定；案例搜索解决了“法条挤占案例槽位”的链路问题，但需要继续优化多相关案例召回；跨法域比较已具备较好的覆盖；风险识别虽然会强制检查直接法规、相似案例和补充义务，但结构完整不等于 gold 证据完整，下一阶段应优先改善风险任务的 query 分解、候选配额和 rerank 目标。
+
+发布前同时执行了：
+
+```bash
+python -m pytest -q
+python -m ruff check src tests tools
+python -m ruff format --check src tests tools
+python -m legal_agentic_retrieval.eval_cli validate \
+  --dataset evals/benchmark_v0.jsonl \
+  --index data/corpus_v3.sqlite3
+```
+
+结果为 155 项测试通过、24 条 benchmark 全部有效、11,003 个索引 evidence 中不存在 benchmark 悬空引用，Ruff、格式和 diff 检查均通过。
 
 ## 已知边界
 

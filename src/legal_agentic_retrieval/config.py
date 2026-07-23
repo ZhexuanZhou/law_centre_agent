@@ -37,6 +37,8 @@ class ModelConfig:
     llm_timeout: float
     embedding_timeout: float
     rerank_timeout: float
+    llm_json_retries: int
+    rerank_retries: int
     llm_temperature: float
     llm_context_window: int
     planner_max_tokens: int
@@ -61,6 +63,10 @@ class ModelConfig:
             raise ValueError("passage limits must satisfy overlap < target <= max < threshold")
         if self.token_safety_factor < 1.0:
             raise ValueError("TOKEN_SAFETY_FACTOR must be at least 1.0")
+        if not 0 <= self.llm_json_retries <= 5:
+            raise ValueError("LLM_JSON_RETRIES must be between 0 and 5")
+        if not 0 <= self.rerank_retries <= 5:
+            raise ValueError("RERANK_RETRIES must be between 0 and 5")
         if self.evidence_token_budget + self.synthesis_max_tokens > (
             self.llm_context_window - 4_000
         ):
@@ -92,6 +98,8 @@ class ModelConfig:
             llm_timeout=_float("LLM_TIMEOUT", default=120.0),
             embedding_timeout=_float("EMBEDDING_TIMEOUT", default=120.0),
             rerank_timeout=_float("RERANK_TIMEOUT", default=120.0),
+            llm_json_retries=_non_negative_int("LLM_JSON_RETRIES", default=2),
+            rerank_retries=_non_negative_int("RERANK_RETRIES", default=2),
             llm_temperature=_float("OPENAI_LLM_TEMPERATURE", default=0.0),
             llm_context_window=_positive_int("LLM_CONTEXT_WINDOW", default=60_000),
             planner_max_tokens=_positive_int("PLANNER_MAX_OUTPUT_TOKENS", default=2_000),

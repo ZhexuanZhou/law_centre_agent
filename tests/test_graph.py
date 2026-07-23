@@ -187,6 +187,7 @@ def test_case_search_reserves_case_slot_when_exact_laws_fill_top_k(built_index):
     ).invoke(RetrievalRequest("Find marketing cases", top_k=2))
 
     assert len(result["evidence"]) == 2
+    assert result["evidence"][0]["source_type"] == "case"
     assert "case" in {item["source_type"] for item in result["evidence"]}
 
 

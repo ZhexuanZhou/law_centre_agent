@@ -512,6 +512,23 @@ planner 会看到：
 
 系统不通过国家别名表或概念词典决定这些内容，而是让 LLM 结合当前 catalog 输出结构化结果。
 
+#### JSON 恢复与有限重试
+
+Planner、grader 和 synthesizer 共享结构化输出路径：
+
+```mermaid
+flowchart LR
+    CALL["调用 LLM"] --> PARSE["解析 JSON"]
+    PARSE -->|成功| VALID["结构校验"]
+    PARSE -->|失败| REPAIR["去 Markdown fence / 尾逗号并提取对象"]
+    REPAIR -->|成功| VALID
+    REPAIR -->|失败且未达上限| CORRECT["附带原响应和纠错指令重试"]
+    CORRECT --> CALL
+    REPAIR -->|达到上限| ERROR["抛出明确错误"]
+```
+
+默认额外重试 2 次，由 `LLM_JSON_RETRIES` 控制，允许范围 0–5。恢复只处理能够确定含义的外层格式和尾逗号，不猜测缺失字段或法律内容。若服务返回 `finish_reason=length`，系统不会把截断 JSON 内部的 `filters` 等子对象误当成完整计划，而是明确要求模型缩短后重试。为使计划稳定落在输出预算内，每轮最多保留 8 个 query 和 12 个直接相关的精确条文；这些是长度上限，不是法规词表或国家规则。
+
 ### 8.2 Exact retrieval：明确条款的确定性匹配
 
 引用匹配键进行 Unicode NFKC 规范化、大小写折叠，并仅保留字母数字字符。
@@ -595,6 +612,8 @@ embedding 适合快速扩大召回，reranker 同时读取 query 与文档预览
 
 instruction 使用英文，因为 Qwen3-Reranker 官方训练中的 instruction 主要为英文。文档只发送短预览，避免对最终不会采用的长文重复消耗 reranker 上下文。
 
+Reranker 对 HTTP 错误、非 JSON 响应、错误的 `results` 结构和非法索引执行有界的重新请求，次数由 `RERANK_RETRIES` 控制，默认 2、范围 0–5。所有重试耗尽后暴露带因果链的错误，不静默退回未重排结果。
+
 ### 8.7 来源覆盖与案例槽位
 
 单纯按 reranker 分数截断可能出现一种错误：planner 要求案例，但多个精确法规占满 `top_k`，最后一个案例被裁掉。
@@ -610,7 +629,15 @@ coverage evidence
 → 截断到 top_k
 ```
 
-因此 `case_search` 至少保留一个 case。如果 `doc_id` 通过案例—法条关系过滤得到零案例，系统会移除这个间接 `doc_id` 约束重试案例语义召回，但保留用户国家和日期约束。
+`case_search` 还执行更强的任务级排序约束：
+
+1. rerank 候选数扩大到 `max(2 × top_k, 10)`，但不超过实际候选数；
+2. rerank query 明确说明当前是案例搜索；
+3. 最终截断前稳定地把事实匹配案例放在支持法条之前；
+4. 如果计划同时要求法规且 `top_k > 1`，保留一个支持法条槽位；
+5. evidence packer 保持 graph 已确定的顺序，不再按混合 score 二次排序。
+
+因此案例不只是“至少存在”，还会优先占据前排。该规则不依赖国家别名、概念词表或具体案例 ID。如果 `doc_id` 通过案例—法条关系过滤得到零案例，系统会移除这个间接 `doc_id` 约束重试案例语义召回，但保留用户国家和日期约束。
 
 ### 8.8 Hydrate：从预览恢复完整证据
 
@@ -632,10 +659,12 @@ coverage evidence
 证据排序键为：
 
 ```text
-精确引用优先
-→ grader 请求扩展的 evidence 优先
-→ 分数从高到低
+grader 请求扩展的 evidence 优先
+→ 精确引用优先
+→ 保持 graph 的最终排序
 ```
+
+Rerank、精确匹配和关系扩展的 score 来自不同阶段，数值不可直接比较。保留 graph 顺序可以避免 `score=1.0` 的关联法条覆盖已经排在前面的案例。
 
 #### 单条上限
 
@@ -702,6 +731,16 @@ flowchart TD
 ```
 
 `requested_evidence_ids` 必须属于当前 evidence 且 `is_truncated=true`。模型请求扩展一个已经完整的证据会被拒绝。
+
+风险任务还必须满足三类结构化 coverage：
+
+| coverage | 含义 | 证据约束 |
+|---|---|---|
+| `applicable_law` | 直接支配主要风险的法规 | 至少一个 `law_unit` |
+| `analogous_case` | 事实或法律争点实质相似的案例 | 至少一个 `case` |
+| `supplementary_obligations` | 主规则之外、由场景事实引出的补充义务 | 至少一个不同于主法条的 `law_unit` |
+
+每类包含 `satisfied`、`evidence_ids` 和 `gap`。系统只接受当前 evidence 中、source type 正确的 ID；同一法规证据不能同时满足主法条和补充义务。任一类别缺失都会把状态改为 `retrieval_gap`，并把具体缺口传回 planner 生成定向查询。
 
 恢复次数由 `max_replans` 限制，默认 1、最大 3，防止图无限循环。
 
