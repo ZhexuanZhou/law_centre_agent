@@ -967,3 +967,28 @@ python -m ruff format --check src tests
 | 增量语料关系与 manifest | `src/crawler/law_corpus/corpus_store.py` |
 | GDPRhub API 客户端与案例解析 | `src/crawler/law_corpus/case_sources/gdprhub.py` |
 | GDPRhub 案例采集命令 | `tools/acquire_gdprhub_cases.py` |
+
+## 17. 检索评测
+
+评测集把“相关”拆成三个互补维度：
+
+```mermaid
+flowchart LR
+    Q["Benchmark query"] --> J["1–3 级 relevance judgments"]
+    J --> R["Recall / MRR / nDCG"]
+    Q --> MUST["required evidence"]
+    MUST --> RR["RequiredRecall"]
+    Q --> GROUP["coverage groups"]
+    GROUP --> COV["法域与来源 Coverage"]
+```
+
+普通 Recall 无法正确表达比较任务。例如比较中国、欧盟和新加坡时，返回三个欧盟条款不能算覆盖完整。`coverage_groups` 为每个比较目标建立集合约束，只有每组达到 `min_hits` 才算满足。
+
+基准集分为：
+
+- `dev`：允许用于 prompt、召回和 rerank 调优；
+- `test`：只在方案冻结后运行，防止针对已知失败样本过拟合；
+- `silver`：证据 ID 已验证、内容有依据，但尚未独立人工复核；
+- `gold`：经过人工复核和分歧仲裁，记录 reviewer 与日期。
+
+评测代码位于 `src/legal_agentic_retrieval/evaluation.py`，在线运行入口为 `src/legal_agentic_retrieval/eval_cli.py`。默认使用 reference-only，因此指标衡量检索结果，不混入答案生成质量。

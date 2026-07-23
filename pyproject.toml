@@ -24,6 +24,7 @@ dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
 [project.scripts]
 law-agentic-retrieval = "legal_agentic_retrieval.cli:main"
 law-corpus-tool = "crawler.law_corpus.law_update:main"
+law-retrieval-eval = "legal_agentic_retrieval.eval_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

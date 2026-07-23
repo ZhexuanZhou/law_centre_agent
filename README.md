@@ -438,6 +438,30 @@ python -m ruff format --check src tests
 python -m pytest tests/crawler -q
 ```
 
+## 检索评测集
+
+`evals/benchmark_v0.jsonl` 提供 24 条结构化评测样本，四类任务各 6 条，并划分为 16 条 dev 和 8 条 test。当前标签状态为 `silver`：全部 evidence 已通过索引结构校验，但仍需要法律专业人员复核后才能升级为人工 `gold`。
+
+```bash
+python -m legal_agentic_retrieval.eval_cli validate \
+  --dataset evals/benchmark_v0.jsonl \
+  --index data/corpus_v3.sqlite3
+
+python -m legal_agentic_retrieval.eval_cli run \
+  --dataset evals/benchmark_v0.jsonl \
+  --split dev \
+  --index data/corpus_v3.sqlite3 \
+  --env-file .env \
+  --output evals/results/dev.jsonl
+
+python -m legal_agentic_retrieval.eval_cli score \
+  --dataset evals/benchmark_v0.jsonl \
+  --results evals/results/dev.jsonl \
+  --split dev
+```
+
+评测器输出 Recall@K、RequiredRecall@K、MRR、nDCG、Precision 和比较对象覆盖率。完整标注规范和防止 test 泄漏的流程见 [evals/README.md](evals/README.md)。
+
 ## 已知边界
 
 - GDPRhub 是二手案例摘要，不等于判决全文；

@@ -2,6 +2,7 @@ data/
 corpus/raw/
 corpus/structured/
 corpus/structured_candidate/
+evals/results/
 .env
 .vscode/
 .DS_Store
