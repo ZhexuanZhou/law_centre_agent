@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "law-agentic-retrieval"
+version = "0.1.0"
+description = "Standalone LangGraph legal agentic retrieval with two-stage evidence recall"
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12.0",
+  "httpx>=0.27.0",
+  "langgraph>=1.0,<2.0",
+  "numpy>=1.26.0",
+  "openai>=2.0.0",
+  "pypdf>=5.0.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
+
+[project.scripts]
+law-agentic-retrieval = "legal_agentic_retrieval.cli:main"
+law-corpus-tool = "crawler.law_corpus.law_update:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

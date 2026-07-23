@@ -1,0 +1,14 @@
+data/
+corpus/raw/
+corpus/structured/
+corpus/structured_candidate/
+.env
+.vscode/
+.DS_Store
+*.py[cod]
+*.sqlite3
+*.vectors.npy
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

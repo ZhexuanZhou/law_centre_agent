@@ -1,0 +1,19 @@
+# Copy this file to laws.custom.toml and edit every value.
+# target_path may point to a pre-downloaded file when download_mode = "manual".
+
+[[sources]]
+doc_id = "replace_with_stable_versioned_doc_id"
+title = "Replace with the official law title"
+jurisdiction = "EU"
+law_family = "eu_gdpr"
+source_type = "primary_law"
+version_date = "2026-01-01"
+effective_date = "2026-01-01"
+language = "en"
+url = "https://example.invalid/official-law"
+preferred_format = "html"
+download_mode = "manual"
+target_path = "corpus/raw/laws/EU/custom/2026-01-01/custom_law.html"
+manual_instructions = "Download the complete official legal text and save it to target_path."
+source_set = "custom"
+translation_status = "official_original"
