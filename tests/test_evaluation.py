@@ -127,6 +127,38 @@ def test_gold_annotation_requires_reviewer_and_date() -> None:
         BenchmarkSample.from_mapping(payload)
 
 
+def test_gold_annotation_rejects_invalid_review_date() -> None:
+    payload = {
+        "id": "exact_law_001",
+        "split": "dev",
+        "task": "exact_law",
+        "query": "GDPR 第六条",
+        "language": "zh-CN",
+        "difficulty": "easy",
+        "retrieval_k": 5,
+        "relevance": [
+            {
+                "evidence_id": "law_unit:gdpr:article_6",
+                "grade": 3,
+                "required": True,
+                "rationale": "明确指定条款",
+            }
+        ],
+        "coverage_groups": [],
+        "expected_limitations": [],
+        "tags": [],
+        "annotation": {
+            "status": "gold",
+            "method": "human_review",
+            "reviewer": "reviewer",
+            "reviewed_at": "2026/07/23",
+        },
+    }
+
+    with pytest.raises(ValueError, match="ISO date"):
+        BenchmarkSample.from_mapping(payload)
+
+
 def test_validate_benchmark_checks_evidence_ids_against_index(built_index) -> None:
     index_path, _ = built_index
     valid_sample = _sample(

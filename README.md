@@ -440,7 +440,9 @@ python -m pytest tests/crawler -q
 
 ## 检索评测集
 
-`evals/benchmark_v0.jsonl` 提供 24 条结构化评测样本，四类任务各 6 条，并划分为 16 条 dev 和 8 条 test。当前标签状态为 `silver`：全部 evidence 已通过索引结构校验，但仍需要法律专业人员复核后才能升级为人工 `gold`。
+`evals/benchmark_v0.jsonl` 提供 24 条结构化评测样本，四类任务各 6 条，并划分为 16 条 dev 和 8 条 test。当前 24 条样本均为 `gold`：相关性标签已经依据当前 `corpus_v3.sqlite3` 的法规全文、案例摘要、结构化引用关系和真实检索候选池逐条复核。
+
+这里的 `gold` 是“当前语料快照上的检索金标”，复核方法为 `ai_assisted_pooled_corpus_review`，并不表示两名法律专业人员已经独立出具法律意见。语料新增或变更后需要重新扩充候选池并复核标签。
 
 ```bash
 python -m legal_agentic_retrieval.eval_cli validate \

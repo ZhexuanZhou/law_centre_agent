@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 import json
 import math
 from pathlib import Path
@@ -89,6 +90,13 @@ class Annotation:
             raise ValueError("annotation method must not be empty")
         if status == "gold" and (not reviewer or not reviewed_at):
             raise ValueError("gold annotations require reviewer and reviewed_at")
+        if status == "gold":
+            try:
+                date.fromisoformat(reviewed_at)
+            except ValueError as exc:
+                raise ValueError(
+                    "gold annotation reviewed_at must be an ISO date (YYYY-MM-DD)"
+                ) from exc
         return cls(
             status=status,
             method=method,

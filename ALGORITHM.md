@@ -988,7 +988,9 @@ flowchart LR
 
 - `dev`：允许用于 prompt、召回和 rerank 调优；
 - `test`：只在方案冻结后运行，防止针对已知失败样本过拟合；
-- `silver`：证据 ID 已验证、内容有依据，但尚未独立人工复核；
-- `gold`：经过人工复核和分歧仲裁，记录 reviewer 与日期。
+- `silver`：证据 ID 已验证、内容有依据，但尚未完成候选池裁决；
+- `gold`：已针对明确的语料快照逐条裁决候选证据，并记录复核方法、reviewer 与 ISO 日期。
+
+当前 `benchmark_v0.jsonl` 的 24 条样本属于 `ai_assisted_pooled_corpus_review`：复核覆盖法规/案例原文、结构化案例—法条关系以及现有 Agent 的检索候选池。它是可用于检索指标的“语料级 gold”，不是两名法律专业人员独立复核后的“专家级 gold”。新增法规或案例后，原有 gold 标签也必须重新 pooling 和裁决，否则新出现的相关证据会被误算为无关。
 
 评测代码位于 `src/legal_agentic_retrieval/evaluation.py`，在线运行入口为 `src/legal_agentic_retrieval/eval_cli.py`。默认使用 reference-only，因此指标衡量检索结果，不混入答案生成质量。

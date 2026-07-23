@@ -69,6 +69,20 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["status", "method", "reviewer", "reviewed_at"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "gold"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reviewer": {"type": "string", "minLength": 1},
+              "reviewed_at": {"type": "string", "format": "date"}
+            }
+          }
+        }
+      ],
       "properties": {
         "status": {"enum": ["draft", "silver", "gold"]},
         "method": {"type": "string", "minLength": 1},
