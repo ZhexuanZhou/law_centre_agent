@@ -79,6 +79,49 @@ python -m legal_agentic_retrieval.eval_cli validate \
   --index data/corpus_v3.sqlite3
 ```
 
+## 导出服务标注 CSV
+
+以下命令把嵌套的 gold JSONL 展开为长表：一行对应一个
+`query × evidence` 判断，并从 SQLite 补齐法规全文或案例事实与裁决。
+这条命令不调用 LLM、embedding 或 reranker，也不需要 `.env`：
+
+```bash
+python -m legal_agentic_retrieval.eval_cli export-csv \
+  --dataset evals/benchmark_v0.jsonl \
+  --index data/corpus_v3.sqlite3 \
+  --output evals/benchmark_v0.service_annotation.csv
+```
+
+CSV 使用带 BOM 的 UTF-8 编码，方便 Excel 和外部标注服务识别中文。
+为了让法务只判断“这个 evidence 对当前 query 是否相关、是否不可替代”，
+表中固定只有 7 列：
+
+| 列 | 用途 |
+|---|---|
+| `sample_id` | 用于把法务结论准确回写到原测试样本 |
+| `task` | `exact_law`、`risk`、`compare` 或 `case_search` |
+| `query` | 用户问题 |
+| `evidence_id` | 用于把结论准确回写到具体法规或案例 |
+| `evidence` | 合并后的标题、引用、法域和完整证据正文 |
+| `is_relevant` | 该证据是否支持 query，只允许 `true` 或 `false` |
+| `is_required` | 缺少该证据是否无法完整回答 query，只允许 `true` 或 `false` |
+
+表中不暴露 `gold_grade`、`required`、coverage group 或原标注理由，避免影响法务的
+独立判断。原始 `benchmark_v0.jsonl` 仍是包含完整 gold 标签的内部答案文件。
+
+法务填写时应按 `sample_id` 查看同一 query 下的全部 evidence，并遵守：
+
+- `is_relevant=false` 时，`is_required` 必须填写 `false`；
+- 证据相关且没有同等替代证据时，填写 `is_required=true`；
+- 多条证据可以相互替代时，它们可以都是 relevant，但单条应填写
+  `is_required=false`；
+- coverage group 不要求法务填写，收回结果后由评测维护者根据同一 query 的
+  可替代证据关系更新。
+
+默认导出完整证据。只有标注平台存在单元格长度限制时才使用
+`--text-limit 30000`，但截断可能影响法务判断，因此不建议常规使用。
+可通过 `--split dev`、`--split test` 或 `--task risk` 单独导出子集。
+
 ## 运行 Agent
 
 先只运行 dev：

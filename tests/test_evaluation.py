@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 from legal_agentic_retrieval.evaluation import (
     BenchmarkSample,
+    export_annotation_csv,
     load_benchmark,
     score_benchmark,
     score_sample,
@@ -250,3 +252,92 @@ def test_load_results_prefers_success_over_retried_failure(tmp_path: Path) -> No
 
     assert results["risk_001"]["evidence"][0]["evidence_id"] == "case:1"
     assert results["risk_002"]["evidence"][0]["evidence_id"] == "case:2"
+
+
+def test_export_annotation_csv_contains_only_binary_review_fields(
+    built_index,
+    tmp_path: Path,
+) -> None:
+    index_path, _ = built_index
+    output = tmp_path / "service.csv"
+
+    report = export_annotation_csv(
+        [_sample()],
+        index_path=index_path,
+        output_path=output,
+    )
+    with output.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert report["row_count"] == 2
+    assert list(rows[0]) == [
+        "sample_id",
+        "task",
+        "query",
+        "evidence_id",
+        "evidence",
+        "is_relevant",
+        "is_required",
+    ]
+    assert rows[0]["sample_id"] == "risk_001"
+    assert rows[0]["task"] == "risk"
+    assert rows[0]["query"] == "测试风险查询"
+    assert rows[0]["evidence_id"] == "case:gdprhub:1"
+    assert rows[0]["is_relevant"] == ""
+    assert rows[0]["is_required"] == ""
+    assert "标题：AEPD - Marketing email" in rows[0]["evidence"]
+    assert "Facts:" in rows[0]["evidence"]
+    assert "标题：General Data Protection Regulation" in rows[1]["evidence"]
+    assert "Article 6" in rows[1]["evidence"]
+
+
+def test_export_annotation_csv_can_limit_combined_evidence(
+    built_index,
+    tmp_path: Path,
+) -> None:
+    index_path, _ = built_index
+    output = tmp_path / "blind.csv"
+
+    export_annotation_csv(
+        [_sample()],
+        index_path=index_path,
+        output_path=output,
+        text_limit=40,
+    )
+    with output.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows[0]["evidence"]) == 40
+    assert rows[0]["is_relevant"] == ""
+    assert rows[0]["is_required"] == ""
+
+
+def test_export_annotation_csv_rejects_missing_index_evidence(
+    built_index,
+    tmp_path: Path,
+) -> None:
+    index_path, _ = built_index
+    sample = _sample(
+        relevance=[
+            {
+                "evidence_id": "case:missing",
+                "grade": 3,
+                "required": True,
+                "rationale": "不存在的证据",
+            }
+        ],
+        coverage_groups=[
+            {
+                "name": "case",
+                "evidence_ids": ["case:missing"],
+                "min_hits": 1,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="missing from the index"):
+        export_annotation_csv(
+            [sample],
+            index_path=index_path,
+            output_path=tmp_path / "missing.csv",
+        )

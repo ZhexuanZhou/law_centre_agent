@@ -9,6 +9,7 @@ from typing import Any
 from legal_agentic_retrieval.config import ModelConfig
 from legal_agentic_retrieval.evaluation import (
     BenchmarkSample,
+    export_annotation_csv,
     load_benchmark,
     load_results,
     score_benchmark,
@@ -56,6 +57,22 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["exact_law", "risk", "compare", "case_search"],
     )
     score_parser.add_argument("--split", choices=["dev", "test"])
+
+    export_parser = subparsers.add_parser(
+        "export-csv",
+        help="Export query-evidence rows for an external annotation service",
+    )
+    export_parser.add_argument("--dataset", default=DEFAULT_DATASET)
+    export_parser.add_argument("--index", default=DEFAULT_INDEX)
+    export_parser.add_argument("--output", required=True)
+    export_parser.add_argument("--task", choices=["exact_law", "risk", "compare", "case_search"])
+    export_parser.add_argument("--split", choices=["dev", "test"])
+    export_parser.add_argument(
+        "--text-limit",
+        type=int,
+        default=0,
+        help="Maximum characters in the combined evidence cell; 0 keeps the complete text",
+    )
     return parser
 
 
@@ -77,6 +94,20 @@ def main() -> None:
             samples,
             load_results(args.results),
             cutoffs=args.cutoff or (1, 3, 5, 10),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if args.command == "export-csv":
+        samples = _select_samples(
+            load_benchmark(args.dataset),
+            task=args.task,
+            split=args.split,
+        )
+        result = export_annotation_csv(
+            samples,
+            index_path=args.index,
+            output_path=args.output,
+            text_limit=args.text_limit,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return

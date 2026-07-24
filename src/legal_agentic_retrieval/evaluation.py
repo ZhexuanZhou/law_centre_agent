@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from datetime import date
 import json
@@ -14,6 +15,15 @@ from legal_agentic_retrieval.models import TaskMode
 
 ALLOWED_TASKS = {"exact_law", "risk", "compare", "case_search"}
 ALLOWED_ANNOTATION_STATUSES = {"draft", "silver", "gold"}
+ANNOTATION_CSV_COLUMNS = (
+    "sample_id",
+    "task",
+    "query",
+    "evidence_id",
+    "evidence",
+    "is_relevant",
+    "is_required",
+)
 
 
 @dataclass(frozen=True)
@@ -278,6 +288,183 @@ def evidence_ids_in_index(index_path: str | Path) -> set[str]:
         }
         case_ids = {f"case:{row[0]}" for row in connection.execute("SELECT case_id FROM cases")}
     return law_ids | case_ids
+
+
+def export_annotation_csv(
+    samples: Sequence[BenchmarkSample],
+    *,
+    index_path: str | Path,
+    output_path: str | Path,
+    text_limit: int = 0,
+) -> dict[str, Any]:
+    """Export the minimum query-evidence fields needed for binary legal review."""
+    if text_limit < 0:
+        raise ValueError("text_limit must be zero or a positive integer")
+    if not samples:
+        raise ValueError("at least one benchmark sample is required")
+
+    requested_evidence_ids = {
+        judgment.evidence_id for sample in samples for judgment in sample.relevance
+    }
+    evidence_by_id = _load_evidence_records(index_path, requested_evidence_ids)
+    missing_evidence_ids = sorted(requested_evidence_ids - set(evidence_by_id))
+    if missing_evidence_ids:
+        raise ValueError(
+            "benchmark evidence is missing from the index: " + ", ".join(missing_evidence_ids)
+        )
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    row_count = 0
+    task_counts: dict[str, int] = {}
+    with output.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=ANNOTATION_CSV_COLUMNS,
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for sample in samples:
+            task_counts[sample.task] = task_counts.get(sample.task, 0) + 1
+            for judgment in sample.relevance:
+                evidence = evidence_by_id[judgment.evidence_id]
+                review_text = _format_review_evidence(evidence)
+                review_text, _ = _limit_text(review_text, text_limit)
+                writer.writerow(
+                    {
+                        "sample_id": sample.sample_id,
+                        "task": sample.task,
+                        "query": sample.query,
+                        "evidence_id": judgment.evidence_id,
+                        "evidence": review_text,
+                        "is_relevant": "",
+                        "is_required": "",
+                    }
+                )
+                row_count += 1
+    return {
+        "output": str(output),
+        "sample_count": len(samples),
+        "row_count": row_count,
+        "task_counts": dict(sorted(task_counts.items())),
+        "text_limit": text_limit,
+    }
+
+
+def _load_evidence_records(
+    index_path: str | Path,
+    evidence_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    law_unit_ids = sorted(
+        evidence_id.removeprefix("law_unit:")
+        for evidence_id in evidence_ids
+        if evidence_id.startswith("law_unit:")
+    )
+    case_ids = sorted(
+        evidence_id.removeprefix("case:")
+        for evidence_id in evidence_ids
+        if evidence_id.startswith("case:")
+    )
+    records: dict[str, dict[str, Any]] = {}
+    with sqlite3.connect(index_path) as connection:
+        connection.row_factory = sqlite3.Row
+        for row in _select_in_batches(
+            connection,
+            """
+            SELECT
+                u.unit_id, u.unit_type, u.canonical_citation, u.local_citation,
+                u.text, u.jurisdiction, u.effective_from, u.effective_to,
+                l.title, l.source_url
+            FROM law_units AS u
+            JOIN laws AS l ON l.doc_id = u.doc_id
+            WHERE u.unit_id IN ({placeholders})
+            """,
+            law_unit_ids,
+        ):
+            records[f"law_unit:{row['unit_id']}"] = {
+                "evidence_id": f"law_unit:{row['unit_id']}",
+                "source_type": "law_unit",
+                "title": row["title"] or "",
+                "citation": row["canonical_citation"] or row["local_citation"] or "",
+                "jurisdiction": row["jurisdiction"] or "",
+                "country": "",
+                "authority": "",
+                "decided_date": "",
+                "outcome": "",
+                "unit_type": row["unit_type"] or "",
+                "effective_from": row["effective_from"] or "",
+                "effective_to": row["effective_to"] or "",
+                "source_url": row["source_url"] or "",
+                "evidence_text": row["text"] or "",
+            }
+        for row in _select_in_batches(
+            connection,
+            """
+            SELECT
+                case_id, title, authority, jurisdiction, country, decided_date,
+                case_number, ecli, facts_text, decision_text, outcome, source_url
+            FROM cases
+            WHERE case_id IN ({placeholders})
+            """,
+            case_ids,
+        ):
+            citation = row["ecli"] or row["case_number"] or row["case_id"]
+            facts = str(row["facts_text"] or "").strip()
+            decision = str(row["decision_text"] or "").strip()
+            records[f"case:{row['case_id']}"] = {
+                "evidence_id": f"case:{row['case_id']}",
+                "source_type": "case",
+                "title": row["title"] or "",
+                "citation": citation,
+                "jurisdiction": row["jurisdiction"] or "",
+                "country": row["country"] or "",
+                "authority": row["authority"] or "",
+                "decided_date": row["decided_date"] or "",
+                "outcome": row["outcome"] or "",
+                "unit_type": "",
+                "effective_from": "",
+                "effective_to": "",
+                "source_url": row["source_url"] or "",
+                "evidence_text": f"Facts: {facts}\nDecision: {decision}".strip(),
+            }
+    return records
+
+
+def _select_in_batches(
+    connection: sqlite3.Connection,
+    query_template: str,
+    values: Sequence[str],
+    *,
+    batch_size: int = 500,
+) -> Iterable[sqlite3.Row]:
+    for start in range(0, len(values), batch_size):
+        batch = values[start : start + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        yield from connection.execute(
+            query_template.format(placeholders=placeholders),
+            batch,
+        )
+
+
+def _format_review_evidence(evidence: Mapping[str, Any]) -> str:
+    header = [
+        f"标题：{evidence['title']}",
+        f"引用：{evidence['citation']}",
+        f"法域：{evidence['jurisdiction']}",
+    ]
+    if evidence["country"]:
+        header.append(f"国家：{evidence['country']}")
+    if evidence["authority"]:
+        header.append(f"机构：{evidence['authority']}")
+    if evidence["decided_date"]:
+        header.append(f"日期：{evidence['decided_date']}")
+    return "\n".join([*header, "", str(evidence["evidence_text"])])
+
+
+def _limit_text(text: str, text_limit: int) -> tuple[str, bool]:
+    if not text_limit or len(text) <= text_limit:
+        return text, False
+    return text[:text_limit], True
 
 
 def load_results(path: str | Path) -> dict[str, dict[str, Any]]:
