@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence, TypeVar
 
 import httpx
 import numpy as np
 from openai import OpenAI, OpenAIError
 
 from legal_agentic_retrieval.config import ModelConfig
-from legal_agentic_retrieval.models import Evidence, RetrievalPlan, RetrievalRequest
+from legal_agentic_retrieval.models import Evidence, RiskQueries, RetrievalPlan, RetrievalRequest
+
+_T = TypeVar("_T")
 
 
 class Embedder(Protocol):
@@ -119,11 +121,50 @@ class OpenAILegalPlanner:
             validator=RetrievalPlan.from_mapping,
         )
         plan = RetrievalPlan.from_mapping(payload)
-        return replace(
+        plan = replace(
             plan,
             queries=plan.queries[:_MAX_PLAN_QUERIES],
             exact_citations=plan.exact_citations[:_MAX_EXACT_CITATIONS],
+            risk_queries=RiskQueries(
+                applicable_law=plan.risk_queries.applicable_law[:_MAX_RISK_ROLE_QUERIES],
+                analogous_case=plan.risk_queries.analogous_case[:_MAX_RISK_ROLE_QUERIES],
+                supplementary_obligations=(
+                    plan.risk_queries.supplementary_obligations[:_MAX_RISK_ROLE_QUERIES]
+                ),
+            ),
         )
+        if previous_plan is not None and plan.task == previous_plan.task == "risk":
+            plan = replace(
+                plan,
+                queries=_merge_unique(
+                    previous_plan.queries,
+                    plan.queries,
+                    limit=_MAX_PLAN_QUERIES,
+                ),
+                exact_citations=_merge_unique(
+                    previous_plan.exact_citations,
+                    plan.exact_citations,
+                    limit=_MAX_EXACT_CITATIONS,
+                ),
+                risk_queries=RiskQueries(
+                    applicable_law=_merge_unique(
+                        previous_plan.risk_queries.applicable_law,
+                        plan.risk_queries.applicable_law,
+                        limit=_MAX_MERGED_RISK_ROLE_QUERIES,
+                    ),
+                    analogous_case=_merge_unique(
+                        previous_plan.risk_queries.analogous_case,
+                        plan.risk_queries.analogous_case,
+                        limit=_MAX_MERGED_RISK_ROLE_QUERIES,
+                    ),
+                    supplementary_obligations=_merge_unique(
+                        previous_plan.risk_queries.supplementary_obligations,
+                        plan.risk_queries.supplementary_obligations,
+                        limit=_MAX_MERGED_RISK_ROLE_QUERIES,
+                    ),
+                ),
+            )
+        return plan
 
     def grade(
         self,
@@ -530,6 +571,15 @@ def _as_string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _merge_unique(
+    first: Sequence[_T],
+    second: Sequence[_T],
+    *,
+    limit: int,
+) -> tuple[_T, ...]:
+    return tuple(dict.fromkeys([*first, *second]))[:limit]
+
+
 _PLANNER_SYSTEM = """You plan retrieval over a closed legal corpus.
 The corpus has law units and GDPRhub case summaries. Infer the user's task as exactly one of:
 exact_law, risk, compare, case_search. Generate retrieval queries in the language(s) most likely
@@ -542,12 +592,14 @@ Do not add date filters unless the user explicitly requested a date range.
 Plans that need legal requirements must include law_unit; plans that need examples or case
 comparisons must include case. Risk and compare plans normally need both. Replanning must not
 drop a required source type merely because the last retrieval was missing that source.
-For risk tasks, plan separate retrieval queries for: the directly applicable law, factually
-analogous cases, and supplementary obligations relevant to the scenario. Supplementary
-obligations are additional duties beyond the primary rule, selected from the facts rather than
-from a fixed vocabulary. Examples may include procedure, accountability, transparency,
-notification, timing, safeguards, or remedies only when the user scenario makes them relevant.
-If evidence_gaps names one of these three risk coverage categories, add a focused query for it.
+For risk tasks, also return risk_queries with three arrays: applicable_law, analogous_case, and
+supplementary_obligations. Each array must contain 1-4 focused, independently useful retrieval
+queries. applicable_law targets the direct governing rule. analogous_case describes the material
+facts, jurisdiction, industry or actor, disputed conduct, and outcome sought; do not reduce it to
+generic legal terminology. supplementary_obligations targets additional duties raised by the
+facts beyond the primary rule. Select those duties from the scenario rather than a fixed
+vocabulary. Keep each query focused on one issue. If evidence_gaps names one of these three
+coverage categories, add a focused query to that role.
 If an evidence gap identifies a specific provision available in the catalog, add it to
 exact_citations instead of relying only on a semantic query.
 Each exact_citations element must represent exactly one provision. Never combine multiple
@@ -555,14 +607,19 @@ articles, sections, or a range in one local_citation string. Emit multiple objec
 Return at most 8 queries and at most 12 exact_citations. Order both arrays by direct relevance
 and do not enumerate adjacent provisions merely because they exist in the corpus.
 Follow each law's citation_examples format exactly (including language and unit label).
-Return only JSON with: task, queries, filters, exact_citations, comparison_targets, reasoning.
+Return only JSON with: task, queries, filters, exact_citations, comparison_targets, risk_queries,
+reasoning.
 filters has: jurisdictions, countries, doc_ids, source_types, date_from, date_to.
 exact_citations is an array of {"doc_id": string, "local_citation": string}.
 comparison_targets is an array of strings.
+risk_queries is an object with applicable_law, analogous_case, and supplementary_obligations
+arrays. For non-risk tasks these arrays may be empty.
 """
 
 _MAX_PLAN_QUERIES = 8
 _MAX_EXACT_CITATIONS = 12
+_MAX_RISK_ROLE_QUERIES = 4
+_MAX_MERGED_RISK_ROLE_QUERIES = 8
 
 _GRADER_SYSTEM = """Judge whether retrieved evidence is sufficient to answer the request.
 Exact-law tasks need the requested provision. Risk tasks need applicable law evidence and should

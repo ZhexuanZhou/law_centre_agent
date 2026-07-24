@@ -504,7 +504,12 @@ class RetrievalIndex:
                     "WHERE u.doc_id = ? AND u.local_citation_key = ?",
                     (citation.doc_id, _match_key(citation.local_citation)),
                 ).fetchall()
-                evidence.extend(_law_row(row, score=1.0) for row in rows)
+                strict_key = _strict_citation_key(citation.local_citation)
+                evidence.extend(
+                    _law_row(row, score=1.0)
+                    for row in rows
+                    if _strict_citation_key(str(row["local_citation"])) == strict_key
+                )
         return _dedupe(evidence)
 
     def vector_search(
@@ -781,6 +786,11 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def _match_key(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     return "".join(character for character in normalized if character.isalnum())
+
+
+def _strict_citation_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(character for character in normalized if not character.isspace())
 
 
 def _law_embedding_text(law: Mapping[str, Any], unit: Mapping[str, Any]) -> str:

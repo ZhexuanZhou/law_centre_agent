@@ -66,6 +66,28 @@ class RetrievalFilters:
 
 
 @dataclass(frozen=True)
+class RiskQueries:
+    applicable_law: tuple[str, ...] = ()
+    analogous_case: tuple[str, ...] = ()
+    supplementary_obligations: tuple[str, ...] = ()
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        fallback: tuple[str, ...],
+    ) -> RiskQueries:
+        return cls(
+            applicable_law=_strings(value.get("applicable_law")) or fallback,
+            analogous_case=_strings(value.get("analogous_case")) or fallback,
+            supplementary_obligations=(
+                _strings(value.get("supplementary_obligations")) or fallback
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class RetrievalPlan:
     task: TaskMode
     queries: tuple[str, ...]
@@ -73,6 +95,7 @@ class RetrievalPlan:
     exact_citations: tuple[ExactCitation, ...] = ()
     comparison_targets: tuple[str, ...] = ()
     reasoning: str = ""
+    risk_queries: RiskQueries = field(default_factory=RiskQueries)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> RetrievalPlan:
@@ -97,6 +120,15 @@ class RetrievalPlan:
             if isinstance(item, Mapping)
         )
         exact = tuple(item for item in exact if item.doc_id and item.local_citation)
+        raw_risk_queries = value.get("risk_queries")
+        risk_queries = (
+            RiskQueries.from_mapping(
+                raw_risk_queries if isinstance(raw_risk_queries, Mapping) else {},
+                fallback=queries,
+            )
+            if task == "risk"
+            else RiskQueries()
+        )
         return cls(
             task=task,  # type: ignore[arg-type]
             queries=queries,
@@ -104,6 +136,7 @@ class RetrievalPlan:
             exact_citations=exact,
             comparison_targets=_strings(value.get("comparison_targets")),
             reasoning=str(value.get("reasoning") or ""),
+            risk_queries=risk_queries,
         )
 
     def to_dict(self) -> dict[str, Any]:

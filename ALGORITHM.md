@@ -508,9 +508,20 @@ planner 会看到：
 2. 生成一个或多个适合语料语言的检索 query；
 3. 只使用 catalog 中存在的过滤值；
 4. 对明确条款输出 `doc_id + local_citation`；
-5. 比较任务列出 comparison targets。
+5. 比较任务列出 comparison targets；
+6. 风险任务额外输出 `risk_queries.applicable_law`、`analogous_case` 和 `supplementary_obligations` 三组独立 query。
 
 系统不通过国家别名表或概念词典决定这些内容，而是让 LLM 结合当前 catalog 输出结构化结果。
+
+风险 query 不是把同一句话复制三次：
+
+| 角色 | Query 目标 |
+|---|---|
+| `applicable_law` | 直接支配主要风险的规则及其构成要件 |
+| `analogous_case` | 法域、主体/行业、行为、数据用途、程序和结果等事实特征 |
+| `supplementary_obligations` | 主规则之外、由当前事实实际引出的附加义务 |
+
+每组首轮最多 4 条。发生 replan 时，新 query 与首轮 query 做稳定去重合并，每组最多保留 8 条；精确引用也做增量合并。因此补充某一 coverage 缺口不会覆盖已经正确识别的核心法律问题。
 
 #### JSON 恢复与有限重试
 
@@ -531,7 +542,7 @@ flowchart LR
 
 ### 8.2 Exact retrieval：明确条款的确定性匹配
 
-引用匹配键进行 Unicode NFKC 规范化、大小写折叠，并仅保留字母数字字符。
+精确引用采用两阶段匹配。第一阶段用宽键快速查出候选：Unicode NFKC 规范化、大小写折叠，并仅保留字母数字字符。
 
 ```text
 "ARTICLE 6" → "article6"
@@ -544,7 +555,15 @@ flowchart LR
 WHERE doc_id = ? AND local_citation_key = ?
 ```
 
-这避免了向量检索把 Article 6 误匹配成语义相近的 Article 7。
+第二阶段对候选使用保留括号和结构标点、只忽略大小写与空白的严格键确认：
+
+```text
+"Article 4 (11)" = "article 4(11)"
+"Article 4(11)" ≠ "Article 41(1)"
+"Article 7(2)" ≠ "Article 72"
+```
+
+宽键保证索引查询效率，严格键避免不同层级编号在删除标点后碰撞。这既避免向量检索把 Article 6 误匹配成语义相近条文，也避免结构化 exact lookup 自身返回相邻编号。
 
 ### 8.3 Document recall：第一阶段语义召回
 
@@ -571,6 +590,16 @@ max(top_k × 4, 20)
 ```
 
 这给 reranker 留出足够候选，而不是只重排已经被 embedding 严格截断的 top-k。
+
+风险任务不使用一个混合候选池，而是按三类 query 分别召回：
+
+```text
+applicable_law queries          → law_unit 候选 max(top_k × 3, 12)
+analogous_case queries          → case 候选     max(top_k × 3, 12)
+supplementary_obligations       → law_unit 候选 max(top_k × 3, 12)
+```
+
+案例召回保留用户明确指定的国家和日期，但移除只适用于法规的 `doc_id` 与 law jurisdiction 限制，避免通过案例—法条关系间接缩小事实案例池。
 
 ### 8.4 Passage refine：候选内部第二阶段精排
 
@@ -614,6 +643,25 @@ instruction 使用英文，因为 Qwen3-Reranker 官方训练中的 instruction 
 
 Reranker 对 HTTP 错误、非 JSON 响应、错误的 `results` 结构和非法索引执行有界的重新请求，次数由 `RERANK_RETRIES` 控制，默认 2、范围 0–5。所有重试耗尽后暴露带因果链的错误，不静默退回未重排结果。
 
+风险任务执行三次角色化 rerank：
+
+| 角色 | 排序目标 |
+|---|---|
+| 直接法规 | 构成要件与用户行为直接对应，降低相邻条文、执法权和救济条款权重 |
+| 相似案例 | 优先实质事实相似，而不是仅引用相同法条 |
+| 补充义务 | 必须是事实实际触发且不同于主规则的额外义务 |
+
+Qwen rerank 可能把语义召回第一名降到角色 Top-N 之外，因此系统不直接覆盖 embedding 排名，而是执行加权 reciprocal-rank fusion。未进入 rerank Top-N 的候选按并列下一名处理：
+
+```math
+RRF(d) =
+\frac{0.25}{60 + rank_{rerank}(d)}
++
+\frac{0.75}{60 + rank_{recall}(d)}
+```
+
+reranker 用于校正 embedding，而不是单点否决强召回候选。Planner 的精确引用经过严格结构匹配后也只是意图信号：直接法规最多提升排名最靠前的两个 exact，不会让全部 exact 再次占满结果。
+
 ### 8.7 来源覆盖与案例槽位
 
 单纯按 reranker 分数截断可能出现一种错误：planner 要求案例，但多个精确法规占满 `top_k`，最后一个案例被裁掉。
@@ -638,6 +686,16 @@ coverage evidence
 5. evidence packer 保持 graph 已确定的顺序，不再按混合 score 二次排序。
 
 因此案例不只是“至少存在”，还会优先占据前排。该规则不依赖国家别名、概念词表或具体案例 ID。如果 `doc_id` 通过案例—法条关系过滤得到零案例，系统会移除这个间接 `doc_id` 约束重试案例语义召回，但保留用户国家和日期约束。
+
+风险任务使用角色槽位，而不是来源保底。Top-8 的最终配额为：
+
+```text
+4 × applicable_law
+2 × analogous_case
+2 × supplementary_obligations
+```
+
+三个角色按“直接法规 → 案例 → 补充义务”逐轮交错写入结果，同一 evidence 不能重复占用两个槽位。某个角色候选不足时，空余槽位才由其他角色的融合排名补齐。该分配来自风险回答的证据结构和 `top_k`，不依赖具体法规、国家或 benchmark ID。
 
 ### 8.8 Hydrate：从预览恢复完整证据
 
@@ -741,6 +799,8 @@ flowchart TD
 | `supplementary_obligations` | 主规则之外、由场景事实引出的补充义务 | 至少一个不同于主法条的 `law_unit` |
 
 每类包含 `satisfied`、`evidence_ids` 和 `gap`。系统只接受当前 evidence 中、source type 正确的 ID；同一法规证据不能同时满足主法条和补充义务。任一类别缺失都会把状态改为 `retrieval_gap`，并把具体缺口传回 planner 生成定向查询。
+
+Replan 对三类 query、通用 query 和精确引用执行增量合并。新计划可以增加缺失证据的查询，但不能删除首轮已经建立的检索意图。
 
 恢复次数由 `max_replans` 限制，默认 1、最大 3，防止图无限循环。
 

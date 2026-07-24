@@ -3,8 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from legal_agentic_retrieval.models import Evidence
-from legal_agentic_retrieval.models import RetrievalPlan
+from legal_agentic_retrieval.models import Evidence, RetrievalPlan, RetrievalRequest
 from legal_agentic_retrieval.providers import (
     CohereReranker,
     OpenAILegalPlanner,
@@ -218,6 +217,89 @@ def test_planner_retries_when_model_output_reaches_token_limit() -> None:
     assert payload["task"] == "risk"
     assert len(calls) == 2
     assert "truncated at the output-token limit" in calls[1]["messages"][-1]["content"]
+
+
+def test_risk_plan_parses_role_specific_queries() -> None:
+    plan = RetrievalPlan.from_mapping(
+        {
+            "task": "risk",
+            "queries": ["broad fallback"],
+            "filters": {"source_types": ["law_unit", "case"]},
+            "risk_queries": {
+                "applicable_law": ["direct governing rule"],
+                "analogous_case": ["same actor conduct and outcome"],
+                "supplementary_obligations": ["additional procedural duty"],
+            },
+        }
+    )
+
+    assert plan.risk_queries.applicable_law == ("direct governing rule",)
+    assert plan.risk_queries.analogous_case == ("same actor conduct and outcome",)
+    assert plan.risk_queries.supplementary_obligations == ("additional procedural duty",)
+    assert RetrievalPlan.from_mapping(plan.to_dict()) == plan
+
+
+def test_risk_replan_preserves_previous_role_queries_and_exact_citations() -> None:
+    class Completions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content=(
+                                '{"task":"risk","queries":["new broad"],'
+                                '"filters":{"source_types":["law_unit","case"]},'
+                                '"exact_citations":[{"doc_id":"gdpr","local_citation":"Article 7"}],'
+                                '"comparison_targets":[],"reasoning":"fill gap",'
+                                '"risk_queries":{"applicable_law":["new direct"],'
+                                '"analogous_case":["new case"],'
+                                '"supplementary_obligations":["new supplement"]}}'
+                            )
+                        ),
+                    )
+                ]
+            )
+
+    planner = OpenAILegalPlanner.__new__(OpenAILegalPlanner)
+    planner.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    planner.model = "test"
+    planner.temperature = 0.0
+    planner.extra_body = {}
+    planner.json_retries = 0
+    planner.planner_max_tokens = 500
+    previous = RetrievalPlan.from_mapping(
+        {
+            "task": "risk",
+            "queries": ["original broad"],
+            "filters": {"source_types": ["law_unit", "case"]},
+            "exact_citations": [{"doc_id": "gdpr", "local_citation": "Article 6"}],
+            "risk_queries": {
+                "applicable_law": ["original direct"],
+                "analogous_case": ["original case"],
+                "supplementary_obligations": ["original supplement"],
+            },
+        }
+    )
+
+    plan = planner.plan(
+        RetrievalRequest("Assess risk"),
+        corpus_catalog={"laws": []},
+        previous_plan=previous,
+        gaps=["risk coverage missing: analogous_case"],
+    )
+
+    assert plan.queries == ("original broad", "new broad")
+    assert [item.local_citation for item in plan.exact_citations] == [
+        "Article 6",
+        "Article 7",
+    ]
+    assert plan.risk_queries.applicable_law == ("original direct", "new direct")
+    assert plan.risk_queries.analogous_case == ("original case", "new case")
+    assert plan.risk_queries.supplementary_obligations == (
+        "original supplement",
+        "new supplement",
+    )
 
 
 def test_reranker_retries_after_malformed_json(monkeypatch) -> None:

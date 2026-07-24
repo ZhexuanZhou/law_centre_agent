@@ -4,7 +4,12 @@ from collections import deque
 from typing import Any, Mapping, Sequence
 
 from legal_agentic_retrieval.evidence import EvidencePacker
-from legal_agentic_retrieval.graph import LegalRetrievalAgent
+from legal_agentic_retrieval.graph import (
+    LegalRetrievalAgent,
+    _merge_risk_rankings,
+    _reciprocal_rank_fusion,
+    _risk_role_quotas,
+)
 from legal_agentic_retrieval.index import RetrievalIndex
 from legal_agentic_retrieval.models import Evidence, RetrievalPlan, RetrievalRequest
 from legal_agentic_retrieval.tokenization import TokenCounter
@@ -87,6 +92,21 @@ class LawOnlyReranker:
         return [item for item in evidence if item.source_type == "law_unit"][:top_n]
 
 
+class RecordingRoleReranker:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def rerank(
+        self,
+        query: str,
+        evidence: Sequence[Evidence],
+        *,
+        top_n: int,
+    ) -> list[Evidence]:
+        self.queries.append(query)
+        return list(evidence[:top_n])
+
+
 def _plan(**overrides: Any) -> RetrievalPlan:
     payload = {
         "task": "risk",
@@ -113,6 +133,192 @@ def test_graph_retrieves_cases_and_expands_resolved_law_relation(built_index):
     assert result["findings"][0]["evidence_ids"][0] in {
         item["evidence_id"] for item in result["evidence"]
     }
+
+
+def test_risk_retrieval_uses_role_queries_candidate_quotas_and_interleaved_slots(
+    built_index,
+    monkeypatch,
+):
+    path, embedder = built_index
+    planner = FakePlanner(
+        [
+            _plan(
+                filters={
+                    "doc_ids": ["eu_gdpr_2016_679", "china_pipl_2021"],
+                    "source_types": ["law_unit", "case"],
+                },
+                risk_queries={
+                    "applicable_law": ["direct consent rule"],
+                    "analogous_case": ["retail marketing without consent"],
+                    "supplementary_obligations": ["proof and accountability duty"],
+                },
+            )
+        ],
+        [True],
+    )
+    reranker = RecordingRoleReranker()
+    index = RetrievalIndex(path, embedder)
+    original_vector_search = index.vector_search
+    searches: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], int]] = []
+
+    def recording_vector_search(queries, filters, *, limit):
+        searches.append(
+            (
+                tuple(queries),
+                tuple(filters.source_types),
+                tuple(filters.doc_ids),
+                limit,
+            )
+        )
+        return original_vector_search(queries, filters, limit=limit)
+
+    monkeypatch.setattr(index, "vector_search", recording_vector_search)
+    result = LegalRetrievalAgent(
+        index,
+        planner,
+        reranker,
+        max_replans=0,
+    ).invoke(RetrievalRequest("Assess consent risk", top_k=3))
+
+    assert searches == [
+        (
+            ("direct consent rule",),
+            ("law_unit",),
+            ("eu_gdpr_2016_679", "china_pipl_2021"),
+            12,
+        ),
+        (("retail marketing without consent",), ("case",), (), 12),
+        (
+            ("proof and accountability duty",),
+            ("law_unit",),
+            ("eu_gdpr_2016_679", "china_pipl_2021"),
+            12,
+        ),
+    ]
+    assert [item["source_type"] for item in result["evidence"]] == [
+        "law_unit",
+        "case",
+        "law_unit",
+    ]
+    assert len(reranker.queries) == 3
+    assert any("Evidence role: applicable_law" in query for query in reranker.queries)
+    assert any("Evidence role: analogous_case" in query for query in reranker.queries)
+    assert any("Evidence role: supplementary_obligations" in query for query in reranker.queries)
+
+
+def test_risk_slot_quota_and_merge_keep_roles_distinct():
+    quotas = _risk_role_quotas(8)
+    laws = [
+        Evidence(f"law:{index}", "law_unit", f"Law {index}", "Rule", 1.0, None)
+        for index in range(6)
+    ]
+    cases = [
+        Evidence(f"case:{index}", "case", f"Case {index}", "Facts", 1.0, None) for index in range(3)
+    ]
+
+    merged = _merge_risk_rankings(
+        {
+            "applicable_law": laws[:4],
+            "analogous_case": cases,
+            "supplementary_obligations": [laws[0], laws[4], laws[5]],
+        },
+        [*laws, *cases],
+        quotas=quotas,
+        limit=8,
+    )
+
+    assert quotas == {
+        "applicable_law": 4,
+        "analogous_case": 2,
+        "supplementary_obligations": 2,
+    }
+    assert [item.source_type for item in merged] == [
+        "law_unit",
+        "case",
+        "law_unit",
+        "law_unit",
+        "case",
+        "law_unit",
+        "law_unit",
+        "law_unit",
+    ]
+    assert len({item.evidence_id for item in merged}) == 8
+
+
+def test_risk_rank_fusion_prevents_reranker_from_dropping_top_recall_candidate():
+    recalled = [
+        Evidence("case:gold", "case", "Gold", "Closest facts", 0.9, None),
+        Evidence("case:b", "case", "B", "Related", 0.8, None),
+        Evidence("case:c", "case", "C", "Related", 0.7, None),
+        Evidence("case:d", "case", "D", "Related", 0.6, None),
+    ]
+    reranked = [recalled[1], recalled[2], recalled[3], recalled[0]]
+
+    fused = _reciprocal_rank_fusion(reranked, recalled)
+
+    assert fused.index(recalled[0]) < 3
+
+
+def test_risk_rerank_promotes_only_primary_exact_intent():
+    generic = Evidence(
+        "law:generic",
+        "law_unit",
+        "Generic",
+        "Adjacent rule",
+        0.9,
+        None,
+        metadata={"retrieval_roles": ["applicable_law"]},
+    )
+    primary = Evidence(
+        "law:primary",
+        "law_unit",
+        "Primary",
+        "Direct rule",
+        1.0,
+        None,
+        metadata={
+            "retrieval_roles": ["applicable_law", "supplementary_obligations"],
+            "risk_exact_rank": 1,
+        },
+    )
+    supplementary = Evidence(
+        "law:supplement",
+        "law_unit",
+        "Supplement",
+        "Additional duty",
+        0.8,
+        None,
+        metadata={"retrieval_roles": ["supplementary_obligations"]},
+    )
+    analogous = Evidence(
+        "case:analogous",
+        "case",
+        "Analogous",
+        "Matching facts",
+        0.8,
+        None,
+        metadata={"retrieval_roles": ["analogous_case"]},
+    )
+    agent = LegalRetrievalAgent.__new__(LegalRetrievalAgent)
+    agent.reranker = RecordingRoleReranker()
+
+    ranked = agent._rerank_risk(
+        RetrievalRequest("Assess risk", top_k=3),
+        _plan(
+            risk_queries={
+                "applicable_law": ["direct"],
+                "analogous_case": ["facts"],
+                "supplementary_obligations": ["additional"],
+            }
+        ),
+        [generic, primary, supplementary, analogous],
+    )
+
+    assert [item.evidence_id for item in ranked] == [
+        "law:primary",
+        "case:analogous",
+        "law:supplement",
+    ]
 
 
 def test_graph_replans_once_when_model_grades_evidence_insufficient(built_index):

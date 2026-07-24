@@ -4,6 +4,7 @@ import sqlite3
 
 from legal_agentic_retrieval.index import (
     RetrievalIndex,
+    _strict_citation_key,
     document_vector_path_for,
     passage_vector_path_for,
 )
@@ -34,6 +35,12 @@ def test_exact_retrieval_uses_structured_doc_id_and_citation(built_index):
     evidence = index.exact([ExactCitation(doc_id="eu_gdpr_2016_679", local_citation="ARTICLE 6")])
 
     assert [item.metadata["unit_id"] for item in evidence] == ["gdpr:article_6"]
+
+
+def test_strict_citation_key_preserves_hierarchy_and_normalizes_spacing():
+    assert _strict_citation_key(" ARTICLE 4 (11) ") == _strict_citation_key("article 4(11)")
+    assert _strict_citation_key("Article 4(11)") != _strict_citation_key("Article 41(1)")
+    assert _strict_citation_key("Article 7(2)") != _strict_citation_key("Article 72")
 
 
 def test_hydration_restores_complete_law_text(built_index):
