@@ -15,6 +15,10 @@ from legal_agentic_retrieval.models import Evidence, RiskQueries, RetrievalPlan,
 _T = TypeVar("_T")
 
 
+class ProviderError(ValueError):
+    """A configured model service returned no usable response."""
+
+
 class Embedder(Protocol):
     model_name: str
     dimension: int
@@ -79,7 +83,7 @@ class OpenAIEmbedder:
         ordered = sorted(response.data, key=lambda item: item.index)
         matrix = np.asarray([item.embedding for item in ordered], dtype=np.float32)
         if matrix.shape != (len(texts), self.dimension):
-            raise ValueError(
+            raise ProviderError(
                 f"embedding shape mismatch: expected {(len(texts), self.dimension)}, "
                 f"received {matrix.shape}"
             )
@@ -269,7 +273,7 @@ class OpenAILegalPlanner:
             except (TypeError, ValueError) as exc:
                 last_error = exc
                 correction_reason = f"The previous response failed validation: {exc}."
-        raise ValueError(
+        raise ProviderError(
             "model returned no valid structured response after "
             f"{self.json_retries + 1} attempts; last error: {last_error}"
         ) from last_error
@@ -331,7 +335,7 @@ class CohereReranker:
                 return ranked
             except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
                 last_error = exc
-        raise ValueError(f"reranker failed after {self.retries + 1} attempts") from last_error
+        raise ProviderError(f"reranker failed after {self.retries + 1} attempts") from last_error
 
 
 def _normalize_rows(matrix: np.ndarray) -> np.ndarray:

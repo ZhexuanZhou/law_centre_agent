@@ -7,6 +7,7 @@
 - 比较概念在不同法域、法规和案例中的差异；
 - 搜索事实相似的案例并回链相关法条；
 - 仅返回最终检索证据，不生成自然语言答案。
+- 以命令行、Python API 或常驻 HTTP 服务方式调用。
 
 项目默认使用中文生成答案。运行时不依赖原来的 `law_centre_lightrag_based` 仓库。
 
@@ -58,10 +59,12 @@ law_centre_agent/
 ├── src/legal_agentic_retrieval/
 │   ├── cli.py               # 命令行入口
 │   ├── config.py            # 环境变量与预算校验
+│   ├── http_api.py          # FastAPI 路由、请求校验和并发保护
 │   ├── models.py            # 请求、计划、证据和图状态
 │   ├── index.py             # 索引构建、精确检索、向量检索和补全
 │   ├── providers.py         # LLM、embedding、Qwen reranker 适配器
 │   ├── evidence.py          # token-aware 证据打包
+│   ├── runtime.py           # 可复用 Agent 的统一构造入口
 │   ├── tokenization.py      # 离线 token 估算
 │   └── graph.py             # LangGraph 工作流
 └── tests/
@@ -85,7 +88,7 @@ SQLite 当前包含 25 部法规、7,634 个有效法规单元和 3,369 个案�
 
 - Python 3.11 或更高版本；
 - 推荐使用 conda 环境 `dev`；
-- 一个 OpenAI-compatible LLM 服务；
+- DeepSeek 云端 LLM 服务；
 - 一个 OpenAI-compatible embedding 服务；
 - 一个支持 `/rerank` 的 Qwen3-Reranker 服务；
 - 模型名称和 embedding 维度必须与索引 metadata 一致。
@@ -96,12 +99,16 @@ SQLite 当前包含 25 部法规、7,634 个有效法规单元和 3,369 个案�
 cp .env.example .env
 ```
 
-然后填写模型地址、模型名和 API key。`.env` 不应提交到版本控制。
+示例已将 LLM 对齐为 dcguard QA 使用的
+`https://api.deepseek.com` / `deepseek-v4-flash`。本机运行时，把 dcguard
+`QA_CLOUD_LLM_API_KEY` 对应的同一凭据安全写入本项目 `.env` 的
+`LLM_BINDING_API_KEY`；部署时应从同一个 Secret 分别注入两个变量，不要把真实密钥写入
+`.env.example`、README 或 Helm values。`.env` 不应提交到版本控制。
 
 ## 安装
 
 ```bash
-cd /Users/zhexuansoffice/Developments/law_centre_agent
+cd law_centre_agent
 conda activate dev
 python -m pip install -e '.[dev]'
 ```
@@ -124,6 +131,72 @@ python -m legal_agentic_retrieval.cli \
 ```
 
 成功输出中三个部分的 `ok` 均应为 `true`。
+
+## 启动 HTTP 服务
+
+查询服务会在启动时加载一次索引、模型客户端和 LangGraph Agent，后续请求复用这些对象：
+
+```bash
+python -m legal_agentic_retrieval.cli \
+  --env-file .env \
+  serve \
+  --index data/corpus_v3.sqlite3 \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+也可以使用安装后生成的命令：
+
+```bash
+law-agentic-retrieval \
+  --env-file .env \
+  serve \
+  --index data/corpus_v3.sqlite3
+```
+
+健康检查只表示 HTTP 进程和本地索引已经初始化，不会在每次探测时请求 LLM、embedding 或 reranker。三个模型端点的深度检查仍使用上面的 `smoke` 命令。
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+普通查询：
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "对比中国 PIPL 与欧盟 GDPR 对处理合法性基础和同意的要求",
+    "top_k": 10,
+    "response_language": "zh-CN",
+    "reference_only": false
+  }'
+```
+
+只返回最终证据：
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "未经有效同意发送营销邮件的案例",
+    "top_k": 5,
+    "reference_only": true
+  }'
+```
+
+请求字段：
+
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `question` | 必填 | 非空问题，最多 50,000 个字符 |
+| `top_k` | `10` | 最终证据数量，范围 1–50 |
+| `response_language` | `zh-CN` | 答案语言，最多 64 个字符 |
+| `reference_only` | `false` | 为 `true` 时只返回最终证据 |
+
+`POST /query` 的返回结构与 CLI/Python API 的 `agent.invoke()` 保持一致。请求校验失败返回 `422`，服务达到并发上限返回 `503`，模型或 reranker 调用失败返回 `502`。交互式接口文档位于 `http://127.0.0.1:8080/docs`，OpenAPI 描述位于 `/openapi.json`。
+
+默认只监听 `127.0.0.1`。需要从容器或其他主机访问时可传 `--host 0.0.0.0`，但本服务不内置认证、TLS、限流或整体请求体大小限制；对外开放前应配置带认证、HTTPS 和请求大小限制的反向代理。
 
 ## 查询
 
@@ -201,30 +274,13 @@ python -m legal_agentic_retrieval.cli \
 
 ```python
 from legal_agentic_retrieval.config import ModelConfig
-from legal_agentic_retrieval.evidence import EvidencePacker
-from legal_agentic_retrieval.graph import LegalRetrievalAgent
-from legal_agentic_retrieval.index import RetrievalIndex
 from legal_agentic_retrieval.models import RetrievalRequest
-from legal_agentic_retrieval.providers import (
-    CohereReranker,
-    OpenAIEmbedder,
-    OpenAILegalPlanner,
-)
-from legal_agentic_retrieval.tokenization import TokenCounter
+from legal_agentic_retrieval.runtime import create_agent
 
 config = ModelConfig.from_env(".env")
-embedder = OpenAIEmbedder(config)
-counter = TokenCounter(safety_factor=config.token_safety_factor)
-index = RetrievalIndex("data/corpus_v3.sqlite3", embedder)
-
-agent = LegalRetrievalAgent(
-    index=index,
-    planner=OpenAILegalPlanner(config),
-    reranker=CohereReranker(config),
-    evidence_packer=EvidencePacker(
-        counter,
-        total_budget=config.evidence_token_budget,
-    ),
+agent = create_agent(
+    config,
+    "data/corpus_v3.sqlite3",
     max_replans=1,
 )
 
@@ -245,6 +301,9 @@ result = agent.invoke(
 | `--max-replans` | 1 | 最多恢复次数，允许范围 0–3 |
 | `--response-language` | `zh-CN` | 最终答案语言 |
 | `--reference-only` | false | 只返回最终证据 |
+| `serve --host` | `127.0.0.1` | HTTP 监听地址 |
+| `serve --port` | `8080` | HTTP 监听端口 |
+| `serve --max-concurrency` | `2` | 单进程同时执行的最大查询数 |
 | `LLM_JSON_RETRIES` | 2 | LLM JSON 解析失败后的纠错重试次数，范围 0–5 |
 | `RERANK_RETRIES` | 2 | rerank HTTP 或 JSON 失败后的重试次数，范围 0–5 |
 | `EVIDENCE_TOKEN_BUDGET` | 42,000 | 交给 grader/synthesizer 的证据预算 |
@@ -522,3 +581,6 @@ python -m legal_agentic_retrieval.eval_cli validate \
 - 文档向量搜索当前为 NumPy mmap 上的精确内积扫描，数据进一步增大后可替换为 ANN；
 - token 数是离线确定性估算，不是 Qwen tokenizer 的精确计数，因此使用 1.2 安全系数；
 - 系统不内置国家别名表、欧盟成员表、概念词典或引用正则，法域和查询扩展由 LLM 计划完成，并由结构化字段约束。
+- HTTP 查询当前为非流式响应，且不内置认证、TLS、限流或整体请求体大小限制；
+- 向量检索会为候选矩阵分配内存，资源受限的机器应使用 `--max-concurrency 1`；
+- 服务运行期间不要原路径重建或替换索引三件套；应构建版本化索引，并在切换索引路径后重启服务，避免旧向量 mmap 与新 SQLite 混用。
