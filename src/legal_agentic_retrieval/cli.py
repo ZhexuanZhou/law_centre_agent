@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from legal_agentic_retrieval.config import ModelConfig
-from legal_agentic_retrieval.evidence import EvidencePacker
-from legal_agentic_retrieval.graph import LegalRetrievalAgent
+from legal_agentic_retrieval.http_api import create_app
 from legal_agentic_retrieval.index import CorpusIndexBuilder, RetrievalIndex
 from legal_agentic_retrieval.models import Evidence, RetrievalRequest
 from legal_agentic_retrieval.providers import (
@@ -13,13 +13,14 @@ from legal_agentic_retrieval.providers import (
     OpenAIEmbedder,
     OpenAILegalPlanner,
 )
+from legal_agentic_retrieval.runtime import create_agent
 from legal_agentic_retrieval.tokenization import TokenCounter
 
 
 DEFAULT_INDEX = "data/corpus_v3.sqlite3"
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Standalone legal agentic retrieval")
     parser.add_argument("--env-file", default=".env")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -45,12 +46,28 @@ def main() -> None:
     )
     smoke_parser.add_argument("--index", default=DEFAULT_INDEX)
     smoke_parser.add_argument("--question", default="精确检索 GDPR Article 6，并说明其适用法域")
-    args = parser.parse_args()
+
+    serve_parser = subparsers.add_parser("serve", help="Run the reusable HTTP query service")
+    serve_parser.add_argument("--index", default=DEFAULT_INDEX)
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=_port, default=8080)
+    serve_parser.add_argument("--max-replans", type=int, choices=range(4), default=1)
+    serve_parser.add_argument("--max-concurrency", type=_positive_int, default=2)
+    serve_parser.add_argument(
+        "--log-level",
+        choices=("critical", "error", "warning", "info", "debug", "trace"),
+        default="info",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     config = ModelConfig.from_env(args.env_file)
-    embedder = OpenAIEmbedder(config)
-    token_counter = TokenCounter(safety_factor=config.token_safety_factor)
     if args.command == "build":
+        embedder = OpenAIEmbedder(config)
+        token_counter = TokenCounter(safety_factor=config.token_safety_factor)
         result = CorpusIndexBuilder(
             args.corpus_dir,
             embedder,
@@ -61,15 +78,9 @@ def main() -> None:
             passage_overlap_tokens=config.passage_overlap_tokens,
         ).build(args.index)
     elif args.command == "query":
-        index = RetrievalIndex(args.index, embedder)
-        agent = LegalRetrievalAgent(
-            index,
-            OpenAILegalPlanner(config),
-            CohereReranker(config),
-            evidence_packer=EvidencePacker(
-                token_counter,
-                total_budget=config.evidence_token_budget,
-            ),
+        agent = create_agent(
+            config,
+            args.index,
             max_replans=args.max_replans,
         )
         result = agent.invoke(
@@ -80,7 +91,8 @@ def main() -> None:
                 reference_only=args.reference_only,
             )
         )
-    else:
+    elif args.command == "smoke":
+        embedder = OpenAIEmbedder(config)
         planner = OpenAILegalPlanner(config)
         reranker = CohereReranker(config)
         catalog = RetrievalIndex(args.index, embedder).catalog()["laws"]
@@ -130,7 +142,43 @@ def main() -> None:
                 ],
             },
         }
+    else:
+        import uvicorn
+
+        index_path = str(Path(args.index).resolve())
+        app = create_app(
+            lambda: create_agent(
+                config,
+                index_path,
+                max_replans=args.max_replans,
+            ),
+            index_path=index_path,
+            max_replans=args.max_replans,
+            max_concurrency=args.max_concurrency,
+        )
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level,
+            workers=1,
+        )
+        return
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _port(value: str) -> int:
+    port = int(value)
+    if port < 1 or port > 65_535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return number
 
 
 if __name__ == "__main__":
