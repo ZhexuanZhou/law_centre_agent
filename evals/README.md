@@ -180,3 +180,36 @@ python -m legal_agentic_retrieval.eval_cli score \
 `test` 候选只用于本次标签裁决，没有据此修改检索算法。gold 标签冻结后，后续调参仍只能使用 `dev`；如果根据 test 失败样本修改系统，应将相应样本移入 dev 并补充新的盲测样本。
 
 若需要“专家级 gold”，建议再由两名法律专业人员独立盲审 grade、required 和 rationale，并对分歧进行仲裁。`expected_limitations` 当前用于人工检查答案边界，尚未自动计算文本生成指标。
+
+## 外部法务二元复核记录（2026-07-29）
+
+外部法务使用 `benchmark_v0.service_annotation.csv` 对 93 条
+`query × evidence` 记录填写了 `is_relevant` 和 `is_required`。维护者将结果与
+现有 Gold、coverage group 和父子条款关系逐项仲裁，采用以下规则：
+
+- `is_relevant` 是法务判断：证据可以是直接答案，也可以是支持案例认定的相关
+  法规；因此 `case_search` 中的相关法规继续保留，不要求结果只能包含案例；
+- `required` 是评测结构判断，不等同于“法律上有用”。它表示缺少该条具体
+  evidence 后，现有相关证据集合无法完整覆盖 query；
+- 多条证据可互相替代时，单条保持 `required=false`，由 coverage group 的
+  `min_hits` 表达集合要求；
+- 父条文和子条款覆盖同一命题时，不同时标为 required；
+- coverage group 只有一条 evidence 时，该 evidence 必须
+  `required=true`。加载 benchmark 时会自动校验这一不变量；
+- 后续法务主要复核 relevance 和法律理由；required 与 coverage group 由评测
+  维护者结合全部候选统一建模，不再直接批量导入逐行 required 结果。
+
+本轮接受两项修正：
+
+- `compare_001` 的 `PIPL Article 13` 改为 required；
+- `risk_005` 的 `GDPR Article 83` 改为 required。
+
+本轮没有接受三项“唯一案例改为非 required”的建议：
+
+- `case_search_002` 的 `case:gdprhub:10052`；
+- `risk_004` 的 `case:gdprhub:9868`；
+- `compare_006` 的 `case:gdprhub:9994`。
+
+其余 required 分歧涉及替代证据、父子条款重复或同组多候选，保持原 Gold。
+每次接受复核修正后都必须重新运行 benchmark validate，并重新计算 dev、test 和
+综合指标；旧结果不得继续作为当前 Gold 的正式指标。

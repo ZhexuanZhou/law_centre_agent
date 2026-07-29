@@ -527,7 +527,99 @@ python -m legal_agentic_retrieval.eval_cli score \
 
 评测器输出 Recall@K、RequiredRecall@K、MRR、nDCG、Precision 和比较对象覆盖率。完整标注规范和防止 test 泄漏的流程见 [evals/README.md](evals/README.md)。
 
-### 最终回归结论（2026-07-23）
+### 外部法务复核后回归（2026-07-29，当前）
+
+外部法务完成 93 条 `query × evidence` 二元复核后，本轮保持案例搜索中的相关
+法规不变，接受两项 required 修正：
+
+- `compare_001` 的 `PIPL Article 13`；
+- `risk_005` 的 `GDPR Article 83`。
+
+其余 required 分歧继续按替代证据、父子条款和 coverage group 规则仲裁。详细
+记录见 [evals/README.md](evals/README.md)。第二轮使用
+`corpus_v3.sqlite3`、Qwen3.5-27B-FP8、Qwen3-Embed 和 Qwen3-Reranker，
+fresh-run 全部 24 条样本；dev 16 条、test 8 条均完成，执行失败为 0。
+
+| 范围 | 样本 | 失败 | Recall@5 | RequiredRecall@5 | MRR@5 | nDCG@5 | Coverage@5 | Recall@10 | RequiredRecall@10 | Coverage@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| dev | 16 | 0 | 0.6705 | 0.9792 | 0.8771 | 0.7680 | 0.9583 | 0.6845 | 0.9792 | 0.9583 |
+| test | 8 | 0 | 0.5256 | 0.7500 | 0.9375 | 0.7062 | 0.7917 | 0.5435 | 0.7500 | 0.8333 |
+| 综合 | 24 | 0 | 0.6222 | 0.9028 | 0.8972 | 0.7474 | 0.9028 | 0.6375 | 0.9028 | 0.9167 |
+
+综合结果按任务拆分：
+
+| 任务 | 推荐观察点 | Recall | RequiredRecall | MRR | nDCG | Coverage | 结论 |
+|---|---|---:|---:|---:|---:|---:|---|
+| 精确法规 | @1 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 6/6 Top-1 命中 |
+| 案例搜索 | @5 | 0.4167 | 1.0000 | 0.5889 | 0.5020 | 1.0000 | 必需案例和来源覆盖稳定，相关法规继续作为有效辅助证据 |
+| 跨法域比较 | @10 | 0.7190 | 0.8333 | 1.0000 | 0.8397 | 0.9444 | 首个相关证据和比较对象覆盖稳定，但完整相关证据召回仍有缺口 |
+| 风险识别 | @10 | 0.4143 | 0.7778 | 1.0000 | 0.5977 | 0.7222 | 首个相关证据稳定，完整相关证据和角色覆盖仍需提升 |
+
+第一轮复核后 fresh-run 中，`exact_law_006` 曾遗漏明确要求的
+`HIPAA 45 CFR 164.312`，只返回相邻条款；第二轮同一配置重新命中，精确法规恢复
+为 6/6 Top-1。这说明 LLM 规划和重排仍有运行间波动，单次结果不应被解释为确定性
+回归。
+
+#### 修改测试集前后对比
+
+为了隔离标签变化与模型随机性，以下 A/B 使用第二轮完全相同的 24 条检索排序：
+A 仅把两项 required 恢复为修改前值，B 使用当前 benchmark。由于 relevance、
+grade 和 coverage group 都没有变化，除 RequiredRecall 外的所有指标差异均为
+`0`。
+
+| 范围 | 指标 | 修改前 | 修改后 | 变化 |
+|---|---|---:|---:|---:|
+| dev | RequiredRecall@1 | 0.6406 | 0.5781 | -0.0625 |
+| dev | RequiredRecall@5/@10 | 0.9792 | 0.9792 | 0.0000 |
+| test | RequiredRecall@5/@10 | 0.7708 | 0.7500 | -0.0208 |
+| 综合 | RequiredRecall@5/@10 | 0.9097 | 0.9028 | -0.0069 |
+| 跨法域比较 | RequiredRecall@1 | 0.3750 | 0.2083 | -0.1667 |
+| 跨法域比较 | RequiredRecall@10 | 0.8333 | 0.8333 | 0.0000 |
+| 风险识别 | RequiredRecall@10 | 0.8056 | 0.7778 | -0.0278 |
+
+两个样本的具体影响：
+
+- `compare_001`：PIPL Article 13 没有排在 Top-1，但进入了 Top-3，因此只降低
+  RequiredRecall@1，不影响 @3/@5/@10；
+- `risk_005`：本轮没有召回新增 required 的 GDPR Article 83，样本
+  RequiredRecall 从 `1/2=0.5` 降为 `1/3=0.3333`，因此 test 和风险任务在所有
+  cutoff 上下降。
+
+以下命令用于本轮 fresh-run 和评分：
+
+```bash
+python -m legal_agentic_retrieval.eval_cli run \
+  --dataset evals/benchmark_v0.jsonl \
+  --split dev \
+  --index data/corpus_v3.sqlite3 \
+  --env-file .env \
+  --output evals/results/dev_legal_review_rerun_20260729.jsonl
+
+python -m legal_agentic_retrieval.eval_cli run \
+  --dataset evals/benchmark_v0.jsonl \
+  --split test \
+  --index data/corpus_v3.sqlite3 \
+  --env-file .env \
+  --output evals/results/test_legal_review_rerun_20260729.jsonl
+
+python -m legal_agentic_retrieval.eval_cli score \
+  --dataset evals/benchmark_v0.jsonl \
+  --results evals/results/dev_legal_review_rerun_20260729.jsonl \
+  --split dev
+
+python -m legal_agentic_retrieval.eval_cli score \
+  --dataset evals/benchmark_v0.jsonl \
+  --results evals/results/test_legal_review_rerun_20260729.jsonl \
+  --split test
+```
+
+修改前后标签 A/B 的完整机器可读结果位于
+`evals/results/label_change_comparison_rerun_20260729.json`。LLM 和 reranker
+具有非确定性，因此不同 fresh-run 之间的差异不能归因于标签修改；只有上述
+“同一排序双重评分”的差异才是两项 required 修正的净影响。以上第二轮数字是当前
+Gold 的最新记录；后面的 2026-07-23 数据仅保留用于历史追踪。
+
+### 上一轮回归结论（2026-07-23，历史）
 
 本轮使用 `corpus_v3.sqlite3`、Qwen3.5-27B-FP8、Qwen3-Embed 和 Qwen3-Reranker，重新执行全部 24 条 gold 样本。16 条 dev、8 条 held-out test 均成功完成，没有 planner JSON、reranker JSON、HTTP 或索引异常。以下数字来自同一轮运行；LLM 和 reranker 具有非确定性，更换模型、语料或服务参数后应重新评测。
 

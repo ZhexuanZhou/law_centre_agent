@@ -102,6 +102,55 @@ def test_benchmark_rejects_unjudged_coverage_evidence() -> None:
         )
 
 
+def test_benchmark_requires_singleton_coverage_evidence() -> None:
+    with pytest.raises(ValueError, match="single-evidence coverage groups"):
+        _sample(
+            relevance=[
+                {
+                    "evidence_id": "case:gdprhub:1",
+                    "grade": 3,
+                    "required": False,
+                    "rationale": "唯一覆盖该组的案例",
+                }
+            ],
+            coverage_groups=[
+                {
+                    "name": "case",
+                    "evidence_ids": ["case:gdprhub:1"],
+                    "min_hits": 1,
+                }
+            ],
+        )
+
+
+def test_benchmark_allows_nonrequired_alternatives_in_coverage_group() -> None:
+    sample = _sample(
+        relevance=[
+            {
+                "evidence_id": "case:gdprhub:1",
+                "grade": 3,
+                "required": False,
+                "rationale": "第一个可替代案例",
+            },
+            {
+                "evidence_id": "case:gdprhub:2",
+                "grade": 3,
+                "required": False,
+                "rationale": "第二个可替代案例",
+            },
+        ],
+        coverage_groups=[
+            {
+                "name": "case",
+                "evidence_ids": ["case:gdprhub:1", "case:gdprhub:2"],
+                "min_hits": 1,
+            }
+        ],
+    )
+
+    assert all(not judgment.required for judgment in sample.relevance)
+
+
 def test_gold_annotation_requires_reviewer_and_date() -> None:
     payload = {
         "id": "exact_law_001",

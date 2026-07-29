@@ -203,6 +203,17 @@ class BenchmarkSample:
                 f"coverage groups reference unjudged evidence for sample {sample_id}: "
                 + ", ".join(unjudged_group_ids)
             )
+        judgments_by_id = {item.evidence_id: item for item in relevance}
+        nonrequired_singleton_groups = sorted(
+            group.name
+            for group in coverage_groups
+            if len(group.evidence_ids) == 1 and not judgments_by_id[group.evidence_ids[0]].required
+        )
+        if nonrequired_singleton_groups:
+            raise ValueError(
+                f"single-evidence coverage groups require required=true for sample {sample_id}: "
+                + ", ".join(nonrequired_singleton_groups)
+            )
 
         annotation_value = value.get("annotation")
         if not isinstance(annotation_value, Mapping):
